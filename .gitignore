@@ -10,5 +10,6 @@ woof_int8.npz
 onnx/
 onnx_fp16/
 *.wav
+build-artifacts/
 __pycache__/
 *.pyc
