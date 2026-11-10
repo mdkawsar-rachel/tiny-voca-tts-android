@@ -18,6 +18,7 @@ import woof.tts.text.Normalizer
 import woof.tts.text.Respeller
 import woof.tts.text.TextSplit
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Settings + on-device preview screen.
  *  Uses WoofEngine directly for preview playback via AudioTrack to guarantee 100% genuine Underdog Woof audio. */
@@ -33,7 +34,7 @@ class MainActivity : Activity() {
     private var engine: WoofEngine? = null
     private var normalizer: Normalizer? = null
     private var audioTrack: AudioTrack? = null
-    @Volatile private var isPlaying = false
+    private val playbackGen = AtomicInteger(0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -149,14 +150,17 @@ class MainActivity : Activity() {
 
     private fun speakText() {
         val text = input.text.toString().ifBlank { "Hello! This is Underdog Woof text to speech." }
-        stopPlayback()
-        isPlaying = true
+        stopPlayback(updateStatus = false)
+        val gen = playbackGen.incrementAndGet()
+        fun isActive() = playbackGen.get() == gen
         speakBtn.isEnabled = false
         stopBtn.isEnabled = true
         val voice = selectedVoice
 
         executor.execute {
+            var track: AudioTrack? = null
             try {
+                if (!isActive()) return@execute
                 runOnUiThread { status.text = "Synthesizing with Woof ($voice)…" }
                 val eng: WoofEngine
                 val norm: Normalizer
@@ -167,118 +171,149 @@ class MainActivity : Activity() {
                 val t0 = SystemClock.elapsedRealtime()
                 val spoken = norm(text)
                 val pieces = TextSplit.splitText(spoken)
-                val allAudio = ArrayList<FloatArray>()
-                for (piece in pieces) {
-                    if (!isPlaying) break
-                    if (piece.isBlank()) continue
-                    val pcm = eng.synthesize(piece, voice)
-                    if (pcm.isNotEmpty()) {
-                        allAudio.add(pcm)
-                    }
-                }
-                val synthTimeMs = SystemClock.elapsedRealtime() - t0
-                if (!isPlaying || allAudio.isEmpty()) {
-                    runOnUiThread {
-                        speakBtn.isEnabled = true
-                        stopBtn.isEnabled = false
-                        status.text = "Ready."
-                    }
-                    return@execute
-                }
 
-                val totalSamples = allAudio.sumOf { it.size }
-                val combined = FloatArray(totalSamples)
-                var offset = 0
-                for (chunk in allAudio) {
-                    System.arraycopy(chunk, 0, combined, offset, chunk.size)
-                    offset += chunk.size
-                }
+                val minBuf = AudioTrack.getMinBufferSize(
+                    eng.sampleRate,
+                    AudioFormat.CHANNEL_OUT_MONO,
+                    AudioFormat.ENCODING_PCM_FLOAT
+                ).coerceAtLeast(eng.sampleRate * 4 / 4)
+                val bufferSize = maxOf(minBuf, eng.sampleRate * 4 / 2)
 
-                val audioDurationSec = totalSamples.toFloat() / eng.sampleRate
-                val rtf = if (synthTimeMs > 0) (audioDurationSec * 1000f) / synthTimeMs else 1f
-
-                runOnUiThread {
-                    status.text = String.format(
-                        "Playing %s voice (%.1fs audio in %dms, %.1fx RTF)…",
-                        voice.replaceFirstChar { it.uppercase() },
-                        audioDurationSec,
-                        synthTimeMs,
-                        rtf
+                track = AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
                     )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+                            .setSampleRate(eng.sampleRate)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(bufferSize)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build()
+
+                if (track.state != AudioTrack.STATE_INITIALIZED) {
+                    throw IllegalStateException("AudioTrack failed to initialize (state=${track.state})")
                 }
 
-                playAudio(combined, eng.sampleRate)
+                synchronized(this@MainActivity) {
+                    if (!isActive()) {
+                        track.release()
+                        track = null
+                        return@execute
+                    }
+                    audioTrack = track
+                }
+
+                var totalSamples = 0L
+                var synthMs = 0L
+                var started = false
+
+                for (piece in pieces) {
+                    if (!isActive()) break
+                    if (piece.isBlank()) continue
+                    val pt0 = SystemClock.elapsedRealtime()
+                    val pcm = eng.synthesize(piece, voice)
+                    synthMs += SystemClock.elapsedRealtime() - pt0
+                    if (!isActive() || pcm.isEmpty()) continue
+
+                    if (!started) {
+                        started = true
+                        track.play()
+                    }
+                    totalSamples += pcm.size
+
+                    val audioSec = totalSamples.toFloat() / eng.sampleRate
+                    val rtf = if (synthMs > 0) (audioSec * 1000f) / synthMs else 1f
+                    runOnUiThread {
+                        if (isActive()) {
+                            status.text = String.format(
+                                "Playing %s voice (%.1fs audio in %dms, %.1fx RTF)…",
+                                voice.replaceFirstChar { it.uppercase() },
+                                audioSec,
+                                synthMs,
+                                rtf
+                            )
+                        }
+                    }
+
+                    var off = 0
+                    while (off < pcm.size && isActive()) {
+                        val n = minOf(4096, pcm.size - off)
+                        val written = track.write(pcm, off, n, AudioTrack.WRITE_BLOCKING)
+                        if (written <= 0) break
+                        off += written
+                    }
+                }
+
+                if (started && isActive()) {
+                    track.stop()
+                    val deadline = SystemClock.elapsedRealtime() + 800L
+                    while (isActive() && (track.playbackHeadPosition.toLong() and 0xFFFFFFFFL) < totalSamples && SystemClock.elapsedRealtime() < deadline) {
+                        Thread.sleep(30)
+                    }
+                }
+
+                val elapsedTotal = SystemClock.elapsedRealtime() - t0
+                val completed = isActive()
+                val audioSec = totalSamples.toFloat() / eng.sampleRate
+                runOnUiThread {
+                    if (completed || playbackGen.get() == gen) {
+                        status.text = if (completed) {
+                            String.format(
+                                "Finished %s (%.1fs audio, %dms).",
+                                voice.replaceFirstChar { it.uppercase() },
+                                audioSec,
+                                elapsedTotal
+                            )
+                        } else {
+                            "Stopped."
+                        }
+                    }
+                }
             } catch (e: Exception) {
                 runOnUiThread {
                     status.text = "Synthesis error: ${e.message}"
-                    speakBtn.isEnabled = true
-                    stopBtn.isEnabled = false
+                }
+            } finally {
+                synchronized(this@MainActivity) {
+                    if (audioTrack === track) {
+                        audioTrack = null
+                    }
+                }
+                try {
+                    track?.pause()
+                    track?.flush()
+                    track?.release()
+                } catch (_: Exception) {}
+                runOnUiThread {
+                    if (playbackGen.get() == gen) {
+                        speakBtn.isEnabled = engine != null
+                        stopBtn.isEnabled = false
+                    }
                 }
             }
         }
     }
 
-    private fun playAudio(samples: FloatArray, sampleRate: Int) {
-        try {
-            val minBuf = AudioTrack.getMinBufferSize(
-                sampleRate,
-                AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_FLOAT
-            )
-            val bufferSize = maxOf(minBuf, samples.size * 4)
-            val track = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
-                        .setSampleRate(sampleRate)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                        .build()
-                )
-                .setBufferSizeInBytes(bufferSize)
-                .setTransferMode(AudioTrack.MODE_STATIC)
-                .build()
-
-            synchronized(this) {
-                audioTrack = track
-            }
-
-            track.write(samples, 0, samples.size, AudioTrack.WRITE_BLOCKING)
-            track.play()
-
-            val durationMs = ((samples.size.toDouble() / sampleRate) * 1000).toLong()
-            val start = SystemClock.elapsedRealtime()
-            while (isPlaying && (SystemClock.elapsedRealtime() - start) < durationMs + 200) {
-                Thread.sleep(50)
-            }
-        } finally {
-            runOnUiThread {
-                speakBtn.isEnabled = true
-                stopBtn.isEnabled = false
-                if (isPlaying) {
-                    status.text = "Ready."
-                }
-            }
-            isPlaying = false
-        }
-    }
-
-    private fun stopPlayback() {
-        isPlaying = false
+    private fun stopPlayback(updateStatus: Boolean = true) {
+        playbackGen.incrementAndGet()
         synchronized(this) {
             try {
-                audioTrack?.stop()
-                audioTrack?.release()
-                audioTrack = null
+                audioTrack?.pause()
+                audioTrack?.flush()
             } catch (_: Exception) {}
         }
-        speakBtn.isEnabled = true
+        speakBtn.isEnabled = engine != null
         stopBtn.isEnabled = false
+        if (updateStatus && ::status.isInitialized) {
+            status.text = "Stopped."
+        }
     }
 
     override fun onDestroy() {

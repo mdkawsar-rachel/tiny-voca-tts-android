@@ -34,7 +34,7 @@ class WoofEngine(context: Context, threads: Int = defaultThreads()) {
     fun synthesize(text: String, voice: String = "juno", seed: Long = 1L, temp: Float = 0.5f, eos: Float = 0.9f): FloatArray {
         val ids = Tokenizer.encodeText(text)
         if (ids.size <= 1) return FloatArray(0)
-        val voiceId = if (voice.trim().equals("mira", ignoreCase = true)) 1L else 0L
+        val voiceId = if (voice.trim().contains("mira", ignoreCase = true)) 1L else 0L
         var s = FloatArray(0)
         var eosVal = 0f
         var kc = FloatArray(0)
@@ -101,11 +101,22 @@ class WoofEngine(context: Context, threads: Int = defaultThreads()) {
         dir.mkdirs()
         for (name in listOf("woof_encoder.onnx", "woof_step.onnx", "woof_decoder.onnx")) {
             val out = File(dir, name)
-            if (out.exists() && out.length() > 1024 * 1024) continue
+            val expectedLen = try {
+                context.assets.openFd("models/$name").use { it.length }
+            } catch (_: Exception) {
+                -1L
+            }
+            val valid = if (expectedLen > 0) {
+                out.exists() && out.length() == expectedLen
+            } else {
+                out.exists() && out.length() > 1024 * 1024
+            }
+            if (valid) continue
             val tmp = File(dir, "$name.tmp")
             context.assets.open("models/$name").use { input ->
                 tmp.outputStream().use { output -> input.copyTo(output) }
             }
+            if (out.exists()) out.delete()
             tmp.renameTo(out)
         }
     }

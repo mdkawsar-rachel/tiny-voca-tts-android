@@ -11,8 +11,8 @@ android {
         applicationId = "woof.tts"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
@@ -44,6 +44,6 @@ tasks.withType<Test>().configureEach {
 }
 
 dependencies {
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.3")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.24.3")
     testImplementation("junit:junit:4.13.2")
 }
