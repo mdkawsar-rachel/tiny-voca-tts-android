@@ -2,8 +2,14 @@ package woof.tts.text
 
 import java.util.regex.Pattern
 
-// Python's re is Unicode-aware by default; Java's predefined classes are ASCII unless this flag is set.
-private const val UNI = Pattern.UNICODE_CHARACTER_CLASS
+// Python's re is Unicode-aware by default; HotSpot needs UNICODE_CHARACTER_CLASS, while Android's ICU Pattern
+// enables Unicode character classes by default and rejects UNICODE_CHARACTER_CLASS.
+private val UNI: Int = try {
+    Pattern.compile("", Pattern.UNICODE_CHARACTER_CLASS)
+    Pattern.UNICODE_CHARACTER_CLASS
+} catch (_: IllegalArgumentException) {
+    0
+}
 
 fun rx(p: String, ignoreCase: Boolean = false): Regex =
     Pattern.compile(p, UNI or if (ignoreCase) Pattern.CASE_INSENSITIVE or Pattern.UNICODE_CASE else 0).toRegex()

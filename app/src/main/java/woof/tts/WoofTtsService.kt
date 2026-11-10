@@ -86,6 +86,7 @@ class WoofTtsService : TextToSpeechService() {
             !reqVoice.isNullOrBlank() && (reqVoice.equals("mira", true) || reqVoice.equals("juno", true)) -> reqVoice
             else -> prefVoice
         }
+        Log.i(TAG, "onSynthesizeText voice=$voiceName len=${text.length}")
         try {
             val engine = engine()
             callback.start(engine.sampleRate, AudioFormat.ENCODING_PCM_16BIT, 1)

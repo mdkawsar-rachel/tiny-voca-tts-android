@@ -140,7 +140,7 @@ class MainActivity : Activity() {
                     speakBtn.isEnabled = true
                     status.text = "Woof engine ready (${selectedVoice.replaceFirstChar { it.uppercase() }} voice)."
                 }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 runOnUiThread {
                     status.text = "Failed to load Woof engine: ${e.message}"
                 }
@@ -276,7 +276,7 @@ class MainActivity : Activity() {
                         }
                     }
                 }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 runOnUiThread {
                     status.text = "Synthesis error: ${e.message}"
                 }
