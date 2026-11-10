@@ -45,26 +45,37 @@ class WoofTtsService : TextToSpeechService() {
 
     override fun onLoadLanguage(lang: String?, country: String?, variant: String?): Int = langAvailable(lang, country)
 
+    override fun onGetLanguage(): Array<String> = arrayOf("eng", "USA", "")
+
     override fun onStop() {
         stopped = true
     }
 
-    override fun onGetDefaultVoice(locale: Locale?): TextToSpeech.Voice? {
-        if (locale != null && locale.language.lowercase(Locale.ROOT) !in listOf("en", "eng")) return null
-        return voice(prefs.getString("voice", "juno") ?: "juno")
+    override fun onGetVoices(): List<TextToSpeech.Voice> {
+        return listOf(
+            TextToSpeech.Voice("juno", Locale.US, TextToSpeech.Voice.QUALITY_VERY_HIGH, TextToSpeech.Voice.LATENCY_NORMAL, false, setOf("male")),
+            TextToSpeech.Voice("mira", Locale.US, TextToSpeech.Voice.QUALITY_VERY_HIGH, TextToSpeech.Voice.LATENCY_NORMAL, false, setOf("female"))
+        )
     }
 
-    override fun onGetVoices(locale: Locale?): List<TextToSpeech.Voice> {
-        if (locale != null && locale.language.lowercase(Locale.ROOT) !in listOf("en", "eng")) return emptyList()
-        return listOf(voice("juno"), voice("mira"))
+    override fun onGetDefaultVoiceNameFor(lang: String?, country: String?, variant: String?): String {
+        val l = lang?.lowercase(Locale.ROOT)
+        if (l != null && l != "en" && l != "eng") return ""
+        return prefs.getString("voice", "juno") ?: "juno"
     }
 
-    private fun voice(name: String) = TextToSpeech.Voice(name, Locale.US, 400, 100, false, HashSet())
+    override fun onIsValidVoiceName(voiceName: String?): Int {
+        return if (voiceName == "juno" || voiceName == "mira") TextToSpeech.SUCCESS else TextToSpeech.ERROR
+    }
+
+    override fun onLoadVoice(voiceName: String?): Int {
+        return if (voiceName == "juno" || voiceName == "mira") TextToSpeech.SUCCESS else TextToSpeech.ERROR
+    }
 
     override fun onSynthesizeText(request: SynthesisRequest, callback: SynthesisCallback) {
         stopped = false
-        val text = request.charSequenceText?.toString() ?: ""
-        val voiceName = request.voice?.name?.takeIf { it == "juno" || it == "mira" }
+        val text = request.charSequenceText?.toString() ?: request.text ?: ""
+        val voiceName = request.voiceName?.takeIf { it == "juno" || it == "mira" }
             ?: prefs.getString("voice", "juno") ?: "juno"
         try {
             val engine = engine()
@@ -93,10 +104,16 @@ class WoofTtsService : TextToSpeechService() {
                     off += n
                 }
             }
-            callback.done()
+            if (callback.hasStarted() && !callback.hasFinished()) {
+                callback.done()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "synthesis failed", e)
-            if (callback.hasStarted() && !callback.hasDone()) callback.done() else callback.error()
+            if (callback.hasStarted() && !callback.hasFinished()) {
+                callback.done()
+            } else {
+                callback.error()
+            }
         }
     }
 

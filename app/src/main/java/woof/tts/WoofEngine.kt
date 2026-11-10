@@ -33,6 +33,7 @@ class WoofEngine(context: Context, threads: Int = defaultThreads()) {
 
     fun synthesize(text: String, voice: String = "juno", seed: Long = 1L, temp: Float = 0.5f, eos: Float = 0.9f): FloatArray {
         val ids = Tokenizer.encodeText(text)
+        if (ids.size <= 1) return FloatArray(0)
         val voiceId = if (voice == "mira") 1L else 0L
         var s = FloatArray(0)
         var eosVal = 0f
@@ -40,13 +41,14 @@ class WoofEngine(context: Context, threads: Int = defaultThreads()) {
         var vc = FloatArray(0)
         var kShape = longArrayOf()
         var vShape = longArrayOf()
-        OnnxTensor.createTensor(env, LongBuffer.wrap(ids.map { it.toLong() }.toLongArray()), longArrayOf(ids.size.toLong())).use { tt ->
+        val idLongs = LongArray(ids.size) { ids[it].toLong() }
+        OnnxTensor.createTensor(env, LongBuffer.wrap(idLongs), longArrayOf(ids.size.toLong())).use { tt ->
             OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(voiceId)), longArrayOf()).use { vt ->
                 enc.run(mapOf("tokens" to tt, "voice_id" to vt)).use { r ->
-                    s = floats(r.get("s") as OnnxTensor)
-                    eosVal = (r.get("eos") as OnnxTensor).floatBuffer.get()
-                    val kt = r.get("k_cache") as OnnxTensor; kc = floats(kt); kShape = kt.info.shape
-                    val vct = r.get("v_cache") as OnnxTensor; vc = floats(vct); vShape = vct.info.shape
+                    s = floats(r.get("s").get() as OnnxTensor)
+                    eosVal = (r.get("eos").get() as OnnxTensor).floatBuffer.get()
+                    val kt = r.get("k_cache").get() as OnnxTensor; kc = floats(kt); kShape = kt.info.shape
+                    val vct = r.get("v_cache").get() as OnnxTensor; vc = floats(vct); vShape = vct.info.shape
                 }
             }
         }
@@ -65,21 +67,22 @@ class WoofEngine(context: Context, threads: Int = defaultThreads()) {
             val vT = OnnxTensor.createTensor(env, FloatBuffer.wrap(vc), vShape)
             try {
                 step.run(mapOf("s_in" to sT, "noise" to nT, "pos" to posT, "k_in" to kT, "v_in" to vT)).use { r ->
-                    lat.add(floats(r.get("z") as OnnxTensor))
-                    s = floats(r.get("s") as OnnxTensor)
-                    eosVal = (r.get("eos") as OnnxTensor).floatBuffer.get()
-                    val kt = r.get("k_cache") as OnnxTensor; kc = floats(kt); kShape = kt.info.shape
-                    val vct = r.get("v_cache") as OnnxTensor; vc = floats(vct); vShape = vct.info.shape
+                    lat.add(floats(r.get("z").get() as OnnxTensor))
+                    s = floats(r.get("s").get() as OnnxTensor)
+                    eosVal = (r.get("eos").get() as OnnxTensor).floatBuffer.get()
+                    val kt = r.get("k_cache").get() as OnnxTensor; kc = floats(kt); kShape = kt.info.shape
+                    val vct = r.get("v_cache").get() as OnnxTensor; vc = floats(vct); vShape = vct.info.shape
                 }
             } finally {
                 listOf(sT, nT, posT, kT, vT).forEach { it.close() }
             }
         }
         val t = lat.size
+        if (t == 0) return FloatArray(0)
         val flat = FloatArray(t * 32)
         for (i in 0 until t) System.arraycopy(lat[i], 0, flat, i * 32, 32)
         OnnxTensor.createTensor(env, FloatBuffer.wrap(flat), longArrayOf(t.toLong(), 32L)).use { lt ->
-            return dec.run(mapOf("latents" to lt)).use { r -> floats(r.get("audio") as OnnxTensor) }
+            return dec.run(mapOf("latents" to lt)).use { r -> floats(r.get("audio").get() as OnnxTensor) }
         }
     }
 
@@ -98,9 +101,12 @@ class WoofEngine(context: Context, threads: Int = defaultThreads()) {
         dir.mkdirs()
         for (name in listOf("woof_encoder.onnx", "woof_step.onnx", "woof_decoder.onnx")) {
             val out = File(dir, name)
-            val assetLen = context.assets.openFd("models/$name").use { it.length }
-            if (out.exists() && out.length() == assetLen) continue
-            context.assets.open("models/$name").use { input -> out.outputStream().use { input.copyTo(it) } }
+            if (out.exists() && out.length() > 1024 * 1024) continue
+            val tmp = File(dir, "$name.tmp")
+            context.assets.open("models/$name").use { input ->
+                tmp.outputStream().use { output -> input.copyTo(output) }
+            }
+            tmp.renameTo(out)
         }
     }
 

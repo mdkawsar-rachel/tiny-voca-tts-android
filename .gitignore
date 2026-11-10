@@ -7,7 +7,6 @@ local.properties
 .kotlin/
 tools/*.jar
 woof_int8.npz
-app/src/main/assets/models/
 onnx/
 onnx_fp16/
 *.wav
