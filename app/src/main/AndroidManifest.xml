@@ -24,13 +24,25 @@
             </intent-filter>
         </activity>
 
+        <!-- Responds to Android System & OEM Settings voice data verification queries -->
+        <activity
+            android:name=".CheckVoiceDataActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.speech.tts.engine.CHECK_TTS_DATA" />
+                <action android:name="android.speech.tts.engine.GET_SAMPLE_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
         <service
             android:name=".WoofTtsService"
             android:exported="true"
-            android:label="@string/engine_label"
-            android:permission="android.permission.BIND_TEXT_TO_SPEECH_SERVICE">
+            android:label="@string/engine_label">
             <intent-filter>
                 <action android:name="android.intent.action.TTS_SERVICE" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
             <meta-data
                 android:name="android.speech.tts"

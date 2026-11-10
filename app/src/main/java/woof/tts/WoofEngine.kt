@@ -34,7 +34,7 @@ class WoofEngine(context: Context, threads: Int = defaultThreads()) {
     fun synthesize(text: String, voice: String = "juno", seed: Long = 1L, temp: Float = 0.5f, eos: Float = 0.9f): FloatArray {
         val ids = Tokenizer.encodeText(text)
         if (ids.size <= 1) return FloatArray(0)
-        val voiceId = if (voice == "mira") 1L else 0L
+        val voiceId = if (voice.trim().equals("mira", ignoreCase = true)) 1L else 0L
         var s = FloatArray(0)
         var eosVal = 0f
         var kc = FloatArray(0)

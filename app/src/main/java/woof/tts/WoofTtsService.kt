@@ -66,18 +66,26 @@ class WoofTtsService : TextToSpeechService() {
     }
 
     override fun onIsValidVoiceName(voiceName: String?): Int {
-        return if (voiceName == "juno" || voiceName == "mira") TextToSpeech.SUCCESS else TextToSpeech.ERROR
+        return if (voiceName.equals("juno", true) || voiceName.equals("mira", true)) TextToSpeech.SUCCESS else TextToSpeech.ERROR
     }
 
     override fun onLoadVoice(voiceName: String?): Int {
-        return if (voiceName == "juno" || voiceName == "mira") TextToSpeech.SUCCESS else TextToSpeech.ERROR
+        return if (voiceName.equals("juno", true) || voiceName.equals("mira", true)) TextToSpeech.SUCCESS else TextToSpeech.ERROR
     }
 
     override fun onSynthesizeText(request: SynthesisRequest, callback: SynthesisCallback) {
         stopped = false
         val text = request.charSequenceText?.toString() ?: request.text ?: ""
-        val voiceName = request.voiceName?.takeIf { it == "juno" || it == "mira" }
-            ?: prefs.getString("voice", "juno") ?: "juno"
+        val paramVoice = request.params?.getString(TextToSpeech.Engine.KEY_PARAM_VOICE_NAME)
+            ?: request.params?.getString("voice")
+        val reqVoice = request.voiceName
+        val prefVoice = prefs.getString("voice", "juno") ?: "juno"
+
+        val voiceName = when {
+            !paramVoice.isNullOrBlank() -> paramVoice
+            !reqVoice.isNullOrBlank() && (reqVoice.equals("mira", true) || reqVoice.equals("juno", true)) -> reqVoice
+            else -> prefVoice
+        }
         try {
             val engine = engine()
             callback.start(engine.sampleRate, AudioFormat.ENCODING_PCM_16BIT, 1)
