@@ -76,7 +76,7 @@ class WoofTtsService : TextToSpeechService() {
     override fun onSynthesizeText(request: SynthesisRequest, callback: SynthesisCallback) {
         stopped = false
         val text = request.charSequenceText?.toString() ?: request.text ?: ""
-        val paramVoice = request.params?.getString(TextToSpeech.Engine.KEY_PARAM_VOICE_NAME)
+        val paramVoice = request.params?.getString("voiceName")
             ?: request.params?.getString("voice")
         val reqVoice = request.voiceName
         val prefVoice = prefs.getString("voice", "juno") ?: "juno"
