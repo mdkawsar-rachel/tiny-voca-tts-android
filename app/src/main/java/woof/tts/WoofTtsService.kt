@@ -5,6 +5,7 @@ import android.speech.tts.SynthesisCallback
 import android.speech.tts.SynthesisRequest
 import android.speech.tts.TextToSpeech
 import android.speech.tts.TextToSpeechService
+import android.speech.tts.Voice
 import android.util.Log
 import woof.tts.text.Normalizer
 import woof.tts.text.Respeller
@@ -51,10 +52,10 @@ class WoofTtsService : TextToSpeechService() {
         stopped = true
     }
 
-    override fun onGetVoices(): List<TextToSpeech.Voice> {
-        return listOf(
-            TextToSpeech.Voice("juno", Locale.US, TextToSpeech.Voice.QUALITY_VERY_HIGH, TextToSpeech.Voice.LATENCY_NORMAL, false, setOf("male")),
-            TextToSpeech.Voice("mira", Locale.US, TextToSpeech.Voice.QUALITY_VERY_HIGH, TextToSpeech.Voice.LATENCY_NORMAL, false, setOf("female"))
+    override fun onGetVoices(): MutableList<Voice> {
+        return mutableListOf(
+            Voice("juno", Locale.US, Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, setOf("male")),
+            Voice("mira", Locale.US, Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, setOf("female"))
         )
     }
 
