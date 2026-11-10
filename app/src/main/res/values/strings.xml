@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Woof TTS</string>
+    <string name="engine_label">Woof TTS (Underdog Woof)</string>
+    <string name="credit">Voice by Underdog Woof · underdog.ai\nFree for non-commercial use.</string>
+    <string name="howto">To use Woof across Android: open the system TTS settings and select \"Woof TTS\" as your engine, then choose a voice. Runs fully offline.</string>
+</resources>
