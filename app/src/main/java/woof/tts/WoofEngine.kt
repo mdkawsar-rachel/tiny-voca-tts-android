@@ -4,6 +4,9 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
+import android.os.Process
+import woof.tts.text.Normalizer
+import woof.tts.text.Respeller
 import woof.tts.text.Tokenizer
 import java.io.File
 import java.nio.FloatBuffer
@@ -19,6 +22,7 @@ class WoofEngine(context: Context, threads: Int = defaultThreads()) {
     private val dec: OrtSession
     private val splitKv: Boolean
     private val numLayers: Int
+    private val synthLock = Any()
     val sampleRate = 24000
 
     init {
@@ -29,9 +33,11 @@ class WoofEngine(context: Context, threads: Int = defaultThreads()) {
         val stepThreads = 1
         val decThreads = threads.coerceIn(1, 4)
 
-        enc = sessionOpts(encThreads).use { env.createSession(File(dir, "woof_encoder.onnx").absolutePath, it) }
-        step = sessionOpts(stepThreads).use { env.createSession(File(dir, "woof_step.onnx").absolutePath, it) }
-        dec = sessionOpts(decThreads).use { env.createSession(File(dir, "woof_decoder.onnx").absolutePath, it) }
+        withAudioPriority {
+            enc = sessionOpts(encThreads).use { env.createSession(File(dir, "woof_encoder.onnx").absolutePath, it) }
+            step = sessionOpts(stepThreads).use { env.createSession(File(dir, "woof_step.onnx").absolutePath, it) }
+            dec = sessionOpts(decThreads).use { env.createSession(File(dir, "woof_decoder.onnx").absolutePath, it) }
+        }
 
         val stepIns = step.inputNames
         splitKv = stepIns.contains("k_in0")
@@ -72,7 +78,6 @@ class WoofEngine(context: Context, threads: Int = defaultThreads()) {
     /** Synthesizes [text] and emits 24 kHz mono float chunks via [onChunk]. When [firstChunkFrames] > 0,
      *  long clauses decode causally in chunks starting at [firstChunkFrames] (using overlap + crossfade)
      *  to cut Time-To-First-Audio while keeping playback gapless. */
-    @Synchronized
     fun synthesizeStreaming(
         text: String,
         voice: String = "juno",
@@ -86,6 +91,25 @@ class WoofEngine(context: Context, threads: Int = defaultThreads()) {
     ) {
         val ids = Tokenizer.encodeText(text)
         if (ids.size <= 1 || isCancelled()) return
+        synchronized(synthLock) {
+            if (isCancelled()) return
+            withAudioPriority {
+                synthesizeStreamingImpl(ids, voice, seed, temp, eos, firstChunkFrames, chunkStrideFrames, isCancelled, onChunk)
+            }
+        }
+    }
+
+    private fun synthesizeStreamingImpl(
+        ids: IntArray,
+        voice: String,
+        seed: Long,
+        temp: Float,
+        eos: Float,
+        firstChunkFrames: Int,
+        chunkStrideFrames: Int,
+        isCancelled: () -> Boolean,
+        onChunk: (FloatArray) -> Unit
+    ) {
         val voiceId = if (voice.trim().contains("mira", ignoreCase = true)) 1L else 0L
         val idLongs = LongArray(ids.size) { ids[it].toLong() }
 
@@ -262,5 +286,57 @@ class WoofEngine(context: Context, threads: Int = defaultThreads()) {
         fun firstChunkFramesForClause(clauseIndex: Int): Int = if (clauseIndex == 0) 44 else 28
 
         fun defaultThreads(): Int = Runtime.getRuntime().availableProcessors().coerceIn(1, 2)
+
+        private var sharedEngine: WoofEngine? = null
+        private var sharedNormalizer: Normalizer? = null
+        private var sharedRefs = 0
+        private val sharedLock = Any()
+
+        /** Returns process-wide shared engine and text normalizer so Activity and TtsService do not duplicate ~330 MB+ ORT sessions. */
+        fun acquireShared(context: Context): Pair<WoofEngine, Normalizer> = synchronized(sharedLock) {
+            val app = context.applicationContext
+            val eng = sharedEngine ?: WoofEngine(app).also { sharedEngine = it }
+            val norm = sharedNormalizer ?: Normalizer(
+                Respeller().apply {
+                    load(app.assets.open("respell.tsv").bufferedReader().use { it.readText() })
+                }
+            ).also { sharedNormalizer = it }
+            sharedRefs++
+            eng to norm
+        }
+
+        fun releaseShared() {
+            val toClose = synchronized(sharedLock) {
+                if (sharedRefs > 0) sharedRefs--
+                if (sharedRefs == 0) {
+                    sharedEngine.also {
+                        sharedEngine = null
+                        sharedNormalizer = null
+                    }
+                } else null
+            }
+            toClose?.close()
+        }
+
+        private inline fun <T> withAudioPriority(block: () -> T): T {
+            val tid = Process.myTid()
+            val prev = Process.getThreadPriority(tid)
+            var raised = false
+            for (prio in intArrayOf(
+                Process.THREAD_PRIORITY_AUDIO,
+                Process.THREAD_PRIORITY_URGENT_DISPLAY,
+                Process.THREAD_PRIORITY_DISPLAY
+            )) {
+                if (runCatching { Process.setThreadPriority(tid, prio) }.isSuccess) {
+                    raised = true
+                    break
+                }
+            }
+            return try {
+                block()
+            } finally {
+                if (raised) runCatching { Process.setThreadPriority(tid, prev) }
+            }
+        }
     }
 }

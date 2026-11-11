@@ -8,32 +8,18 @@ import android.speech.tts.TextToSpeechService
 import android.speech.tts.Voice
 import android.util.Log
 import woof.tts.text.Normalizer
-import woof.tts.text.Respeller
 import woof.tts.text.TextSplit
 import java.util.Locale
 
 /** Android system TTS engine backed by Woof. English only, fully offline. */
 class WoofTtsService : TextToSpeechService() {
-    @Volatile private var engineInstance: WoofEngine? = null
-    @Volatile private var normInstance: Normalizer? = null
+    private var sharedResources: Pair<WoofEngine, Normalizer>? = null
     @Volatile private var stopped = false
 
     private val prefs get() = getSharedPreferences("woof", MODE_PRIVATE)
 
-    private fun engine(): WoofEngine {
-        engineInstance?.let { return it }
-        return synchronized(this) {
-            engineInstance ?: WoofEngine(applicationContext).also { engineInstance = it }
-        }
-    }
-
-    private fun normalizer(): Normalizer {
-        normInstance?.let { return it }
-        return synchronized(this) {
-            normInstance ?: Normalizer(Respeller().apply {
-                load(assets.open("respell.tsv").bufferedReader().use { it.readText() })
-            }).also { normInstance = it }
-        }
+    private fun acquireResources(): Pair<WoofEngine, Normalizer> = synchronized(this) {
+        sharedResources ?: WoofEngine.acquireShared(applicationContext).also { sharedResources = it }
     }
 
     private fun langAvailable(lang: String?, country: String?): Int {
@@ -88,13 +74,13 @@ class WoofTtsService : TextToSpeechService() {
         }
         Log.i(TAG, "onSynthesizeText voice=$voiceName len=${text.length}")
         try {
-            val engine = engine()
+            val (engine, normalizer) = acquireResources()
             callback.start(engine.sampleRate, AudioFormat.ENCODING_PCM_16BIT, 1)
             if (text.isBlank()) {
                 callback.done()
                 return
             }
-            val spoken = normalizer()(text)
+            val spoken = normalizer(text)
             val pieces = TextSplit.splitText(spoken, firstMax = 60).filter { it.isNotBlank() }
             val maxSamples = (callback.maxBufferSize / 2).coerceAtLeast(1)
             for ((idx, piece) in pieces.withIndex()) {
@@ -139,8 +125,10 @@ class WoofTtsService : TextToSpeechService() {
     }
 
     override fun onDestroy() {
-        engineInstance?.close()
-        engineInstance = null
+        val had = synchronized(this) {
+            (sharedResources != null).also { sharedResources = null }
+        }
+        if (had) WoofEngine.releaseShared()
         super.onDestroy()
     }
 

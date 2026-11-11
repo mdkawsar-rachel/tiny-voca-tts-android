@@ -15,7 +15,6 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import woof.tts.text.Normalizer
-import woof.tts.text.Respeller
 import woof.tts.text.TextSplit
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
@@ -39,6 +38,8 @@ class MainActivity : Activity() {
     private val playExecutor = Executors.newSingleThreadExecutor()
     private var engine: WoofEngine? = null
     private var normalizer: Normalizer? = null
+    private var acquiredShared = false
+    private var destroyed = false
     private var audioTrack: AudioTrack? = null
     private val playbackGen = AtomicInteger(0)
 
@@ -130,17 +131,23 @@ class MainActivity : Activity() {
             setPadding(0, 24, 0, 0)
         })
 
-        // Initialize Woof engine in background thread
+        // Initialize shared Woof engine in background thread
         synthExecutor.execute {
             try {
-                val eng = WoofEngine(applicationContext)
-                val respeller = Respeller().apply {
-                    load(assets.open("respell.tsv").bufferedReader().use { it.readText() })
+                val (eng, norm) = WoofEngine.acquireShared(applicationContext)
+                val active = synchronized(this@MainActivity) {
+                    if (destroyed) {
+                        false
+                    } else {
+                        engine = eng
+                        normalizer = norm
+                        acquiredShared = true
+                        true
+                    }
                 }
-                val norm = Normalizer(respeller)
-                synchronized(this@MainActivity) {
-                    engine = eng
-                    normalizer = norm
+                if (!active) {
+                    WoofEngine.releaseShared()
+                    return@execute
                 }
                 runOnUiThread {
                     speakBtn.isEnabled = true
@@ -380,13 +387,21 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        val shouldRelease: Boolean
+        synchronized(this) {
+            destroyed = true
+            shouldRelease = acquiredShared
+            acquiredShared = false
+            engine = null
+            normalizer = null
+        }
         stopPlayback()
         synthExecutor.shutdownNow()
         playExecutor.shutdownNow()
         runCatching {
             synthExecutor.awaitTermination(500, TimeUnit.MILLISECONDS)
         }
-        engine?.close()
+        if (shouldRelease) WoofEngine.releaseShared()
         super.onDestroy()
     }
 }
