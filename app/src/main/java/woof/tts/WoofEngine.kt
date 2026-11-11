@@ -79,8 +79,8 @@ class WoofEngine(context: Context, threads: Int = defaultThreads()) {
         seed: Long = 1L,
         temp: Float = 0.5f,
         eos: Float = 0.9f,
-        firstChunkFrames: Int = 36,
-        chunkStrideFrames: Int = 64,
+        firstChunkFrames: Int = 44,
+        chunkStrideFrames: Int = CHUNK_STRIDE_FRAMES,
         isCancelled: () -> Boolean = { false },
         onChunk: (FloatArray) -> Unit
     ) {
@@ -256,6 +256,10 @@ class WoofEngine(context: Context, threads: Int = defaultThreads()) {
         private const val SAMPLES_PER_FRAME = 960
         private const val DECODER_OVERLAP_FRAMES = 24
         private const val CROSSFADE_SAMPLES = 240
+        const val CHUNK_STRIDE_FRAMES = 36
+
+        /** Target frames before first audio emit per clause: larger first chunk prevents Chunk 2 underruns, smaller follow-up keeps inter-sentence latency near zero. */
+        fun firstChunkFramesForClause(clauseIndex: Int): Int = if (clauseIndex == 0) 44 else 28
 
         fun defaultThreads(): Int = Runtime.getRuntime().availableProcessors().coerceIn(1, 2)
     }

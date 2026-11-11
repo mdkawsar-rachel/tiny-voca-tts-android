@@ -103,8 +103,8 @@ class WoofTtsService : TextToSpeechService() {
                 engine.synthesizeStreaming(
                     text = piece,
                     voice = voiceName,
-                    firstChunkFrames = if (idx == 0) 36 else 0,
-                    chunkStrideFrames = 64,
+                    firstChunkFrames = WoofEngine.firstChunkFramesForClause(idx),
+                    chunkStrideFrames = WoofEngine.CHUNK_STRIDE_FRAMES,
                     isCancelled = { stopped || writeFailed }
                 ) { audio ->
                     var off = 0

@@ -198,8 +198,8 @@ class MainActivity : Activity() {
                     eng.synthesizeStreaming(
                         text = piece,
                         voice = voice,
-                        firstChunkFrames = if (idx == 0) 36 else 0,
-                        chunkStrideFrames = 64,
+                        firstChunkFrames = WoofEngine.firstChunkFramesForClause(idx),
+                        chunkStrideFrames = WoofEngine.CHUNK_STRIDE_FRAMES,
                         isCancelled = { !isActive() }
                     ) { chunk ->
                         synthMs.set(synthElapsed + (SystemClock.elapsedRealtime() - pt0))
