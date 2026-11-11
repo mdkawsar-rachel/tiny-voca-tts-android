@@ -8,12 +8,19 @@ import android.speech.tts.TextToSpeechService
 import android.speech.tts.Voice
 import android.util.Log
 import woof.tts.text.Normalizer
-import woof.tts.text.TextSplit
 import java.util.Locale
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 /** Android system TTS engine backed by Woof. English only, fully offline. */
 class WoofTtsService : TextToSpeechService() {
     private var sharedResources: Pair<WoofEngine, Normalizer>? = null
+    private val synthExecutor = Executors.newSingleThreadExecutor()
+    private val requestGen = AtomicInteger(0)
     @Volatile private var stopped = false
 
     private val prefs get() = getSharedPreferences("woof", MODE_PRIVATE)
@@ -36,6 +43,7 @@ class WoofTtsService : TextToSpeechService() {
 
     override fun onStop() {
         stopped = true
+        requestGen.incrementAndGet()
     }
 
     override fun onGetVoices(): MutableList<Voice> {
@@ -60,6 +68,7 @@ class WoofTtsService : TextToSpeechService() {
     }
 
     override fun onSynthesizeText(request: SynthesisRequest, callback: SynthesisCallback) {
+        val gen = requestGen.incrementAndGet()
         stopped = false
         val text = request.charSequenceText?.toString() ?: request.text ?: ""
         val paramVoice = request.params?.getString("voiceName")
@@ -80,41 +89,48 @@ class WoofTtsService : TextToSpeechService() {
                 callback.done()
                 return
             }
-            val spoken = normalizer(text)
-            val pieces = TextSplit.splitText(spoken, firstMax = 60).filter { it.isNotBlank() }
             val maxSamples = (callback.maxBufferSize / 2).coerceAtLeast(1)
-            for ((idx, piece) in pieces.withIndex()) {
-                if (stopped) break
-                var writeFailed = false
-                engine.synthesizeStreaming(
-                    text = piece,
-                    voice = voiceName,
-                    firstChunkFrames = WoofEngine.firstChunkFramesForClause(idx),
-                    chunkStrideFrames = WoofEngine.CHUNK_STRIDE_FRAMES,
-                    isCancelled = { stopped || writeFailed }
-                ) { audio ->
-                    var off = 0
-                    while (off < audio.size && !stopped) {
-                        val n = minOf(maxSamples, audio.size - off)
-                        val buf = ByteArray(n * 2)
-                        for (i in 0 until n) {
-                            val v = (audio[off + i] * 32767f).toInt().coerceIn(-32768, 32767)
-                            buf[i * 2] = (v and 0xff).toByte()
-                            buf[i * 2 + 1] = ((v shr 8) and 0xff).toByte()
-                        }
-                        if (callback.audioAvailable(buf, 0, buf.size) != TextToSpeech.SUCCESS) {
-                            writeFailed = true
-                            break
-                        }
-                        off += n
-                    }
-                }
-                if (writeFailed) break
+            val queue = ArrayBlockingQueue<FloatArray>(32)
+            val synthDone = AtomicBoolean(false)
+            val synthErr = AtomicReference<Throwable?>(null)
+            val writeFailed = AtomicBoolean(false)
+            fun isActive() = !stopped && requestGen.get() == gen && !writeFailed.get()
+
+            // Decouple synthesis from callback.audioAvailable() because AOSP SynthesisPlaybackQueueItem
+            // blocks after ~500ms of unconsumed audio, which otherwise stalls ONNX chunk generation.
+            synthExecutor.execute {
+                engine.enqueueSpeech(normalizer, text, voiceName, queue, synthDone, synthErr, ::isActive)
             }
+
+            while (isActive()) {
+                val audio = queue.poll(40, TimeUnit.MILLISECONDS)
+                if (audio == null) {
+                    if (synthDone.get() && queue.isEmpty()) break
+                    continue
+                }
+                if (audio.isEmpty()) break
+                var off = 0
+                while (off < audio.size && isActive()) {
+                    val n = minOf(maxSamples, audio.size - off)
+                    val buf = ByteArray(n * 2)
+                    for (i in 0 until n) {
+                        val v = (audio[off + i] * 32767f).toInt().coerceIn(-32768, 32767)
+                        buf[i * 2] = (v and 0xff).toByte()
+                        buf[i * 2 + 1] = ((v shr 8) and 0xff).toByte()
+                    }
+                    if (callback.audioAvailable(buf, 0, buf.size) != TextToSpeech.SUCCESS) {
+                        writeFailed.set(true)
+                        break
+                    }
+                    off += n
+                }
+            }
+            synthErr.get()?.let { throw it }
+
             if (callback.hasStarted() && !callback.hasFinished()) {
                 callback.done()
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "synthesis failed", e)
             if (callback.hasStarted() && !callback.hasFinished()) {
                 callback.done()
@@ -125,6 +141,9 @@ class WoofTtsService : TextToSpeechService() {
     }
 
     override fun onDestroy() {
+        stopped = true
+        requestGen.incrementAndGet()
+        synthExecutor.shutdownNow()
         val had = synchronized(this) {
             (sharedResources != null).also { sharedResources = null }
         }

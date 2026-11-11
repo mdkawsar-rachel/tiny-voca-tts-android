@@ -5,12 +5,19 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.os.Process
+import android.os.SystemClock
 import woof.tts.text.Normalizer
 import woof.tts.text.Respeller
+import woof.tts.text.TextSplit
 import woof.tts.text.Tokenizer
 import java.io.File
 import java.nio.FloatBuffer
 import java.nio.LongBuffer
+import java.util.concurrent.BlockingQueue
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.ln
 
 /** Drives the three Woof ONNX graphs (encoder -> autoregressive step loop -> decoder), mirroring
@@ -78,6 +85,51 @@ class WoofEngine(context: Context, threads: Int = defaultThreads()) {
             off += c.size
         }
         return out
+    }
+
+    /** Normalizes and streams [text] clause-by-clause into [queue], reporting cumulative
+     *  synthesis time in ms to [synthMs] and signalling completion via [synthDone] + sentinel. */
+    fun enqueueSpeech(
+        normalizer: Normalizer,
+        text: String,
+        voice: String,
+        queue: BlockingQueue<FloatArray>,
+        synthDone: AtomicBoolean,
+        synthErr: AtomicReference<Throwable?>,
+        isActive: () -> Boolean,
+        synthMs: AtomicLong? = null
+    ) {
+        try {
+            if (!isActive()) return
+            val spoken = normalizer(text)
+            val pieces = TextSplit.splitText(spoken, firstMax = 60).filter { it.isNotBlank() }
+            var synthElapsed = 0L
+            for ((idx, piece) in pieces.withIndex()) {
+                if (!isActive()) break
+                val pt0 = SystemClock.elapsedRealtime()
+                synthesizeStreaming(
+                    text = piece,
+                    voice = voice,
+                    firstChunkFrames = firstChunkFramesForClause(idx),
+                    chunkStrideFrames = CHUNK_STRIDE_FRAMES,
+                    isCancelled = { !isActive() }
+                ) { chunk ->
+                    synthMs?.set(synthElapsed + (SystemClock.elapsedRealtime() - pt0))
+                    while (isActive() && !queue.offer(chunk, 40, TimeUnit.MILLISECONDS)) {
+                        // Backpressure while consumer drains queue
+                    }
+                }
+                synthElapsed += SystemClock.elapsedRealtime() - pt0
+                synthMs?.set(synthElapsed)
+            }
+        } catch (t: Throwable) {
+            synthErr.compareAndSet(null, t)
+        } finally {
+            synthDone.set(true)
+            while (isActive() && !queue.offer(FloatArray(0), 20, TimeUnit.MILLISECONDS)) {
+                // Unblock consumer once producer exits
+            }
+        }
     }
 
     /** Synthesizes [text] and emits 24 kHz mono float chunks via [onChunk]. When [firstChunkFrames] > 0,

@@ -15,7 +15,6 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import woof.tts.text.Normalizer
-import woof.tts.text.TextSplit
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -190,41 +189,15 @@ class MainActivity : Activity() {
         val synthErr = AtomicReference<Throwable?>(null)
 
         synthExecutor.execute {
-            try {
-                if (!isActive()) return@execute
-                runOnUiThread {
-                    if (isActive()) status.text = "Synthesizing with Woof ($voice)…"
-                }
-                val spoken = norm(text)
-                val pieces = TextSplit.splitText(spoken, firstMax = 60).filter { it.isNotBlank() }
-                var synthElapsed = 0L
-
-                for ((idx, piece) in pieces.withIndex()) {
-                    if (!isActive()) break
-                    val pt0 = SystemClock.elapsedRealtime()
-                    eng.synthesizeStreaming(
-                        text = piece,
-                        voice = voice,
-                        firstChunkFrames = WoofEngine.firstChunkFramesForClause(idx),
-                        chunkStrideFrames = WoofEngine.CHUNK_STRIDE_FRAMES,
-                        isCancelled = { !isActive() }
-                    ) { chunk ->
-                        synthMs.set(synthElapsed + (SystemClock.elapsedRealtime() - pt0))
-                        while (isActive() && !queue.offer(chunk, 40, TimeUnit.MILLISECONDS)) {
-                            // Backpressure until AudioTrack consumes queued chunks
-                        }
-                    }
-                    synthElapsed += SystemClock.elapsedRealtime() - pt0
-                    synthMs.set(synthElapsed)
-                }
-            } catch (e: Throwable) {
-                synthErr.compareAndSet(null, e)
-            } finally {
+            if (!isActive()) {
                 synthDone.set(true)
-                while (isActive() && !queue.offer(FloatArray(0), 20, TimeUnit.MILLISECONDS)) {
-                    // Ensure consumer unblocks once producer exits
-                }
+                queue.offer(FloatArray(0))
+                return@execute
             }
+            runOnUiThread {
+                if (isActive()) status.text = "Synthesizing with Woof ($voice)…"
+            }
+            eng.enqueueSpeech(norm, text, voice, queue, synthDone, synthErr, ::isActive, synthMs)
         }
 
         playExecutor.execute {
