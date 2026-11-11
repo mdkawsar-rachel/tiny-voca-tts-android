@@ -33,11 +33,16 @@ class WoofEngine(context: Context, threads: Int = defaultThreads()) {
         val stepThreads = 1
         val decThreads = threads.coerceIn(1, 4)
 
-        withAudioPriority {
-            enc = sessionOpts(encThreads).use { env.createSession(File(dir, "woof_encoder.onnx").absolutePath, it) }
-            step = sessionOpts(stepThreads).use { env.createSession(File(dir, "woof_step.onnx").absolutePath, it) }
-            dec = sessionOpts(decThreads).use { env.createSession(File(dir, "woof_decoder.onnx").absolutePath, it) }
+        val sessions = withAudioPriority {
+            Triple(
+                sessionOpts(encThreads).use { env.createSession(File(dir, "woof_encoder.onnx").absolutePath, it) },
+                sessionOpts(stepThreads).use { env.createSession(File(dir, "woof_step.onnx").absolutePath, it) },
+                sessionOpts(decThreads).use { env.createSession(File(dir, "woof_decoder.onnx").absolutePath, it) }
+            )
         }
+        enc = sessions.first
+        step = sessions.second
+        dec = sessions.third
 
         val stepIns = step.inputNames
         splitKv = stepIns.contains("k_in0")
