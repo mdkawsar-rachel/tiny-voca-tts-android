@@ -17,8 +17,13 @@ import android.widget.TextView
 import woof.tts.text.Normalizer
 import woof.tts.text.Respeller
 import woof.tts.text.TextSplit
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /** Settings + on-device preview screen.
  *  Uses WoofEngine directly for preview playback via AudioTrack to guarantee 100% genuine Underdog Woof audio. */
@@ -30,7 +35,8 @@ class MainActivity : Activity() {
     private lateinit var stopBtn: Button
 
     private val prefs get() = getSharedPreferences("woof", MODE_PRIVATE)
-    private val executor = Executors.newSingleThreadExecutor()
+    private val synthExecutor = Executors.newSingleThreadExecutor()
+    private val playExecutor = Executors.newSingleThreadExecutor()
     private var engine: WoofEngine? = null
     private var normalizer: Normalizer? = null
     private var audioTrack: AudioTrack? = null
@@ -125,7 +131,7 @@ class MainActivity : Activity() {
         })
 
         // Initialize Woof engine in background thread
-        executor.execute {
+        synthExecutor.execute {
             try {
                 val eng = WoofEngine(applicationContext)
                 val respeller = Respeller().apply {
@@ -152,26 +158,72 @@ class MainActivity : Activity() {
         val text = input.text.toString().ifBlank { "Hello! This is Underdog Woof text to speech." }
         stopPlayback(updateStatus = false)
         val gen = playbackGen.incrementAndGet()
-        fun isActive() = playbackGen.get() == gen
+        val cancelled = AtomicBoolean(false)
+        fun isActive() = !cancelled.get() && playbackGen.get() == gen
         speakBtn.isEnabled = false
         stopBtn.isEnabled = true
         val voice = selectedVoice
 
-        executor.execute {
+        val eng: WoofEngine?
+        val norm: Normalizer?
+        synchronized(this) {
+            eng = engine
+            norm = normalizer
+        }
+        if (eng == null || norm == null) {
+            speakBtn.isEnabled = false
+            stopBtn.isEnabled = false
+            return
+        }
+
+        val t0 = SystemClock.elapsedRealtime()
+        val queue = ArrayBlockingQueue<FloatArray>(12)
+        val synthDone = AtomicBoolean(false)
+        val synthMs = AtomicLong(0L)
+        val synthErr = AtomicReference<Throwable?>(null)
+
+        synthExecutor.execute {
+            try {
+                if (!isActive()) return@execute
+                runOnUiThread {
+                    if (isActive()) status.text = "Synthesizing with Woof ($voice)…"
+                }
+                val spoken = norm(text)
+                val pieces = TextSplit.splitText(spoken, firstMax = 60).filter { it.isNotBlank() }
+                var synthElapsed = 0L
+
+                for ((idx, piece) in pieces.withIndex()) {
+                    if (!isActive()) break
+                    val pt0 = SystemClock.elapsedRealtime()
+                    eng.synthesizeStreaming(
+                        text = piece,
+                        voice = voice,
+                        firstChunkFrames = if (idx == 0) 36 else 0,
+                        chunkStrideFrames = 64,
+                        isCancelled = { !isActive() }
+                    ) { chunk ->
+                        synthMs.set(synthElapsed + (SystemClock.elapsedRealtime() - pt0))
+                        while (isActive() && !queue.offer(chunk, 40, TimeUnit.MILLISECONDS)) {
+                            // Backpressure until AudioTrack consumes queued chunks
+                        }
+                    }
+                    synthElapsed += SystemClock.elapsedRealtime() - pt0
+                    synthMs.set(synthElapsed)
+                }
+            } catch (e: Throwable) {
+                synthErr.compareAndSet(null, e)
+            } finally {
+                synthDone.set(true)
+                while (isActive() && !queue.offer(FloatArray(0), 20, TimeUnit.MILLISECONDS)) {
+                    // Ensure consumer unblocks once producer exits
+                }
+            }
+        }
+
+        playExecutor.execute {
             var track: AudioTrack? = null
             try {
                 if (!isActive()) return@execute
-                runOnUiThread { status.text = "Synthesizing with Woof ($voice)…" }
-                val eng: WoofEngine
-                val norm: Normalizer
-                synchronized(this@MainActivity) {
-                    eng = engine ?: return@execute
-                    norm = normalizer ?: return@execute
-                }
-                val t0 = SystemClock.elapsedRealtime()
-                val spoken = norm(text)
-                val pieces = TextSplit.splitText(spoken)
-
                 val minBuf = AudioTrack.getMinBufferSize(
                     eng.sampleRate,
                     AudioFormat.CHANNEL_OUT_MONO,
@@ -211,49 +263,54 @@ class MainActivity : Activity() {
                 }
 
                 var totalSamples = 0L
-                var synthMs = 0L
                 var started = false
+                var ttfaMs = 0L
 
-                for (piece in pieces) {
-                    if (!isActive()) break
-                    if (piece.isBlank()) continue
-                    val pt0 = SystemClock.elapsedRealtime()
-                    val pcm = eng.synthesize(piece, voice)
-                    synthMs += SystemClock.elapsedRealtime() - pt0
-                    if (!isActive() || pcm.isEmpty()) continue
+                while (isActive()) {
+                    val chunk = queue.poll(40, TimeUnit.MILLISECONDS)
+                    if (chunk == null) {
+                        if (synthDone.get() && queue.isEmpty()) break
+                        continue
+                    }
+                    if (chunk.isEmpty()) break
 
                     if (!started) {
                         started = true
+                        ttfaMs = SystemClock.elapsedRealtime() - t0
                         track.play()
                     }
-                    totalSamples += pcm.size
+                    totalSamples += chunk.size
 
                     val audioSec = totalSamples.toFloat() / eng.sampleRate
-                    val rtf = if (synthMs > 0) (audioSec * 1000f) / synthMs else 1f
+                    val sMs = synthMs.get().coerceAtLeast(1L)
+                    val rtf = (audioSec * 1000f) / sMs
                     runOnUiThread {
                         if (isActive()) {
                             status.text = String.format(
-                                "Playing %s voice (%.1fs audio in %dms, %.1fx RTF)…",
+                                "Playing %s voice (TTFA %dms | %.1fs audio in %dms, %.1fx RTF)…",
                                 voice.replaceFirstChar { it.uppercase() },
+                                ttfaMs,
                                 audioSec,
-                                synthMs,
+                                sMs,
                                 rtf
                             )
                         }
                     }
 
                     var off = 0
-                    while (off < pcm.size && isActive()) {
-                        val n = minOf(4096, pcm.size - off)
-                        val written = track.write(pcm, off, n, AudioTrack.WRITE_BLOCKING)
+                    while (off < chunk.size && isActive()) {
+                        val n = minOf(4096, chunk.size - off)
+                        val written = track.write(chunk, off, n, AudioTrack.WRITE_BLOCKING)
                         if (written <= 0) break
                         off += written
                     }
                 }
 
+                synthErr.get()?.let { throw it }
+
                 if (started && isActive()) {
                     track.stop()
-                    val deadline = SystemClock.elapsedRealtime() + 800L
+                    val deadline = SystemClock.elapsedRealtime() + 1000L
                     while (isActive() && (track.playbackHeadPosition.toLong() and 0xFFFFFFFFL) < totalSamples && SystemClock.elapsedRealtime() < deadline) {
                         Thread.sleep(30)
                     }
@@ -262,13 +319,18 @@ class MainActivity : Activity() {
                 val elapsedTotal = SystemClock.elapsedRealtime() - t0
                 val completed = isActive()
                 val audioSec = totalSamples.toFloat() / eng.sampleRate
+                val sMs = synthMs.get().coerceAtLeast(1L)
+                val rtf = (audioSec * 1000f) / sMs
                 runOnUiThread {
                     if (completed || playbackGen.get() == gen) {
                         status.text = if (completed) {
                             String.format(
-                                "Finished %s (%.1fs audio, %dms).",
+                                "Finished %s (%.1fs audio, TTFA %dms, synth %dms, %.1fx RTF, total %dms).",
                                 voice.replaceFirstChar { it.uppercase() },
                                 audioSec,
+                                ttfaMs,
+                                sMs,
+                                rtf,
                                 elapsedTotal
                             )
                         } else {
@@ -281,6 +343,7 @@ class MainActivity : Activity() {
                     status.text = "Synthesis error: ${e.message}"
                 }
             } finally {
+                cancelled.set(true)
                 synchronized(this@MainActivity) {
                     if (audioTrack === track) {
                         audioTrack = null
@@ -318,7 +381,11 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         stopPlayback()
-        executor.shutdownNow()
+        synthExecutor.shutdownNow()
+        playExecutor.shutdownNow()
+        runCatching {
+            synthExecutor.awaitTermination(500, TimeUnit.MILLISECONDS)
+        }
         engine?.close()
         super.onDestroy()
     }

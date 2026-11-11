@@ -95,24 +95,35 @@ class WoofTtsService : TextToSpeechService() {
                 return
             }
             val spoken = normalizer()(text)
-            val pieces = TextSplit.splitText(spoken)
+            val pieces = TextSplit.splitText(spoken, firstMax = 60).filter { it.isNotBlank() }
             val maxSamples = (callback.maxBufferSize / 2).coerceAtLeast(1)
-            for (piece in pieces) {
+            for ((idx, piece) in pieces.withIndex()) {
                 if (stopped) break
-                if (piece.isBlank()) continue
-                val audio = engine.synthesize(piece, voiceName)
-                var off = 0
-                while (off < audio.size && !stopped) {
-                    val n = minOf(maxSamples, audio.size - off)
-                    val buf = ByteArray(n * 2)
-                    for (i in 0 until n) {
-                        val v = (audio[off + i] * 32767f).toInt().coerceIn(-32768, 32767)
-                        buf[i * 2] = (v and 0xff).toByte()
-                        buf[i * 2 + 1] = ((v shr 8) and 0xff).toByte()
+                var writeFailed = false
+                engine.synthesizeStreaming(
+                    text = piece,
+                    voice = voiceName,
+                    firstChunkFrames = if (idx == 0) 36 else 0,
+                    chunkStrideFrames = 64,
+                    isCancelled = { stopped || writeFailed }
+                ) { audio ->
+                    var off = 0
+                    while (off < audio.size && !stopped) {
+                        val n = minOf(maxSamples, audio.size - off)
+                        val buf = ByteArray(n * 2)
+                        for (i in 0 until n) {
+                            val v = (audio[off + i] * 32767f).toInt().coerceIn(-32768, 32767)
+                            buf[i * 2] = (v and 0xff).toByte()
+                            buf[i * 2 + 1] = ((v shr 8) and 0xff).toByte()
+                        }
+                        if (callback.audioAvailable(buf, 0, buf.size) != TextToSpeech.SUCCESS) {
+                            writeFailed = true
+                            break
+                        }
+                        off += n
                     }
-                    if (callback.audioAvailable(buf, 0, buf.size) != TextToSpeech.SUCCESS) break
-                    off += n
                 }
+                if (writeFailed) break
             }
             if (callback.hasStarted() && !callback.hasFinished()) {
                 callback.done()
