@@ -766,7 +766,7 @@ def main():
     ap.add_argument("--no-check", action="store_true", help="skip the numpy-vs-onnx verification")
     ap.add_argument("--fp16", action="store_true", help="store float weights as float16 (halves size; compute stays fp32)")
     ap.add_argument("--quant", default="none", choices=("none", "nb8", "qint8"),
-                    help="weight quantization for encoder/step: nb8 (8-bit MatMulNBits, fastest) or qint8")
+                    help="weight quantization for encoder/step: nb8 (fast on AVX2/ARM dotprod; slow on ARMv8.0) or qint8")
     ap.add_argument("--legacy", action="store_true", help="export legacy stacked k_cache/v_cache schema")
     ap.add_argument("--demo", metavar="TEXT", help="synthesize TEXT with the exported ONNX models")
     ap.add_argument("--voice", default="juno", choices=VOICES)
