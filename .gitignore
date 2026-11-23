@@ -5,11 +5,12 @@ local.properties
 *.iml
 .idea/
 .kotlin/
-tools/*.jar
-woof_int8.npz
-onnx/
-onnx_fp16/
 *.wav
 build-artifacts/
 __pycache__/
 *.pyc
+.cxx/
+
+# GGUF weights are downloaded by tools/download_models.py (checksum verified).
+app/src/main/assets/models/*.gguf
+app/src/main/assets/models/*.tmp

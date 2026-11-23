@@ -1,4 +1,4 @@
-package woof.tts
+package tinyvoca.tts
 
 import android.media.AudioFormat
 import android.speech.tts.SynthesisCallback
@@ -7,37 +7,36 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.TextToSpeechService
 import android.speech.tts.Voice
 import android.util.Log
-import woof.tts.text.Normalizer
 import java.util.Locale
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
-/** Android system TTS engine backed by Woof. English only, fully offline. */
-class WoofTtsService : TextToSpeechService() {
-    private var sharedResources: Pair<WoofEngine, Normalizer>? = null
+/** Android system TTS engine backed by the native ggml tiny-voca pipeline. */
+class TinyVocaTtsService : TextToSpeechService() {
+    private var engine: TinyVocaEngine? = null
     private val synthExecutor = Executors.newSingleThreadExecutor()
     private val requestGen = AtomicInteger(0)
     @Volatile private var stopped = false
 
-    private val prefs get() = getSharedPreferences("woof", MODE_PRIVATE)
+    private val prefs get() = getSharedPreferences("tinyvoca", MODE_PRIVATE)
 
-    private fun acquireResources(): Pair<WoofEngine, Normalizer> = synchronized(this) {
-        sharedResources ?: WoofEngine.acquireShared(applicationContext).also { sharedResources = it }
+    private fun acquireEngine(): TinyVocaEngine = synchronized(this) {
+        engine ?: TinyVocaEngine.acquireShared(applicationContext).also { engine = it }
     }
 
-    private fun langAvailable(lang: String?, country: String?): Int {
+    override fun onIsLanguageAvailable(lang: String?, country: String?, variant: String?): Int {
         val l = lang?.lowercase(Locale.ROOT) ?: return TextToSpeech.LANG_NOT_SUPPORTED
         if (l != "en" && l != "eng") return TextToSpeech.LANG_NOT_SUPPORTED
         return if (country.isNullOrEmpty()) TextToSpeech.LANG_AVAILABLE else TextToSpeech.LANG_COUNTRY_AVAILABLE
     }
 
-    override fun onIsLanguageAvailable(lang: String?, country: String?, variant: String?): Int = langAvailable(lang, country)
-
-    override fun onLoadLanguage(lang: String?, country: String?, variant: String?): Int = langAvailable(lang, country)
+    override fun onLoadLanguage(lang: String?, country: String?, variant: String?): Int =
+        onIsLanguageAvailable(lang, country, variant)
 
     override fun onGetLanguage(): Array<String> = arrayOf("eng", "USA", "")
 
@@ -46,26 +45,22 @@ class WoofTtsService : TextToSpeechService() {
         requestGen.incrementAndGet()
     }
 
-    override fun onGetVoices(): MutableList<Voice> {
-        return mutableListOf(
-            Voice("juno", Locale.US, Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, setOf("male")),
-            Voice("mira", Locale.US, Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, setOf("female"))
-        )
-    }
+    override fun onGetVoices(): MutableList<Voice> = mutableListOf(
+        Voice(TinyVocaEngine.VOICE_F2, Locale.US, Voice.QUALITY_NORMAL, Voice.LATENCY_NORMAL, false, setOf("female")),
+        Voice(TinyVocaEngine.VOICE_M2, Locale.US, Voice.QUALITY_NORMAL, Voice.LATENCY_NORMAL, false, setOf("male"))
+    )
 
     override fun onGetDefaultVoiceNameFor(lang: String?, country: String?, variant: String?): String {
         val l = lang?.lowercase(Locale.ROOT)
         if (l != null && l != "en" && l != "eng") return ""
-        return prefs.getString("voice", "juno") ?: "juno"
+        return TinyVocaEngine.canonicalVoice(prefs.getString("voice", TinyVocaEngine.DEFAULT_VOICE))
     }
 
-    override fun onIsValidVoiceName(voiceName: String?): Int {
-        return if (voiceName.equals("juno", true) || voiceName.equals("mira", true)) TextToSpeech.SUCCESS else TextToSpeech.ERROR
-    }
+    override fun onIsValidVoiceName(voiceName: String?): Int =
+        if (voiceName.equals(TinyVocaEngine.VOICE_F2, true) ||
+            voiceName.equals(TinyVocaEngine.VOICE_M2, true)) TextToSpeech.SUCCESS else TextToSpeech.ERROR
 
-    override fun onLoadVoice(voiceName: String?): Int {
-        return if (voiceName.equals("juno", true) || voiceName.equals("mira", true)) TextToSpeech.SUCCESS else TextToSpeech.ERROR
-    }
+    override fun onLoadVoice(voiceName: String?): Int = onIsValidVoiceName(voiceName)
 
     override fun onSynthesizeText(request: SynthesisRequest, callback: SynthesisCallback) {
         val gen = requestGen.incrementAndGet()
@@ -73,33 +68,38 @@ class WoofTtsService : TextToSpeechService() {
         val text = request.charSequenceText?.toString() ?: request.text ?: ""
         val paramVoice = request.params?.getString("voiceName")
             ?: request.params?.getString("voice")
-        val reqVoice = request.voiceName
-        val prefVoice = prefs.getString("voice", "juno") ?: "juno"
-
-        val voiceName = when {
+        val requested = when {
             !paramVoice.isNullOrBlank() -> paramVoice
-            !reqVoice.isNullOrBlank() && (reqVoice.equals("mira", true) || reqVoice.equals("juno", true)) -> reqVoice
-            else -> prefVoice
+            else -> request.voiceName
         }
-        Log.i(TAG, "onSynthesizeText voice=$voiceName len=${text.length}")
+        val prefVoice = prefs.getString("voice", TinyVocaEngine.DEFAULT_VOICE)
+        val voice = if (!requested.isNullOrBlank() &&
+            (requested.equals("F2", true) || requested.equals("M2", true) ||
+             requested.equals("juno", true) || requested.equals("mira", true))
+        ) TinyVocaEngine.canonicalVoice(requested)
+        else TinyVocaEngine.canonicalVoice(prefVoice)
+
+        Log.i(TAG, "onSynthesizeText voice=$voice len=${text.length}")
         try {
-            val (engine, normalizer) = acquireResources()
-            callback.start(engine.sampleRate, AudioFormat.ENCODING_PCM_16BIT, 1)
+            val eng = acquireEngine()
+            callback.start(eng.sampleRate, AudioFormat.ENCODING_PCM_16BIT, 1)
             if (text.isBlank()) {
                 callback.done()
                 return
             }
+
             val maxSamples = (callback.maxBufferSize / 2).coerceAtLeast(1)
             val queue = ArrayBlockingQueue<FloatArray>(32)
             val synthDone = AtomicBoolean(false)
             val synthErr = AtomicReference<Throwable?>(null)
             val writeFailed = AtomicBoolean(false)
+            val synthMs = AtomicLong(0L)
             fun isActive() = !stopped && requestGen.get() == gen && !writeFailed.get()
 
-            // Decouple synthesis from callback.audioAvailable() because AOSP SynthesisPlaybackQueueItem
-            // blocks after ~500ms of unconsumed audio, which otherwise stalls ONNX chunk generation.
+            // Keep synthesis off the callback thread: AOSP blocks after ~500 ms
+            // of unconsumed audio in SynthesisPlaybackQueueItem.
             synthExecutor.execute {
-                engine.enqueueSpeech(normalizer, text, voiceName, queue, synthDone, synthErr, ::isActive)
+                eng.enqueueSpeech(text, voice, queue, synthDone, synthErr, ::isActive, synthMs)
             }
 
             while (isActive()) {
@@ -127,16 +127,10 @@ class WoofTtsService : TextToSpeechService() {
             }
             synthErr.get()?.let { throw it }
 
-            if (callback.hasStarted() && !callback.hasFinished()) {
-                callback.done()
-            }
+            if (callback.hasStarted() && !callback.hasFinished()) callback.done()
         } catch (e: Throwable) {
             Log.e(TAG, "synthesis failed", e)
-            if (callback.hasStarted() && !callback.hasFinished()) {
-                callback.done()
-            } else {
-                callback.error()
-            }
+            if (callback.hasStarted() && !callback.hasFinished()) callback.done() else callback.error()
         }
     }
 
@@ -144,14 +138,12 @@ class WoofTtsService : TextToSpeechService() {
         stopped = true
         requestGen.incrementAndGet()
         synthExecutor.shutdownNow()
-        val had = synchronized(this) {
-            (sharedResources != null).also { sharedResources = null }
-        }
-        if (had) WoofEngine.releaseShared()
+        val had = synchronized(this) { (engine != null).also { engine = null } }
+        if (had) TinyVocaEngine.releaseShared()
         super.onDestroy()
     }
 
     companion object {
-        private const val TAG = "WoofTTS"
+        private const val TAG = "TinyVocaTTS"
     }
 }

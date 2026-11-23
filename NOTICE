@@ -1,17 +1,28 @@
-Underdog Woof
-Copyright 2026 Conway
+tiny-voca TTS for Android
+Copyright 2026 tiny-voca TTS contributors
 
-Licensed under the Underdog Non-Commercial License 1.0 (see LICENSE). Free for non-commercial use with credit: put
-"Underdog Woof" or "underdog.ai" in the title or description of anything you publish with its audio, and show
-"Voice by Underdog Woof" in any app that uses it. Commercial use needs a commercial license: license@conway.tech.
+This project is licensed under the Apache License, Version 2.0 (see LICENSE).
 
-This product includes material derived from the following works:
+Third-party components
+----------------------
 
-Mimi, by Kyutai (https://huggingface.co/kyutai/mimi), licensed under CC-BY 4.0
-(https://creativecommons.org/licenses/by/4.0/). The audio decoder in this repository is adapted from Mimi's decoder
-and has been changed.
+tiny-voca (model weights and reference code)
+  Copyright 2026 Muhammed Nazeem
+  Source: https://github.com/n4ze3m/tiny-voca
+  License: Apache-2.0
 
-LibriTTS-R, by Yuma Koizumi et al. (https://www.openslr.org/141/), licensed under CC-BY 4.0. Used as training data.
+dizione (English text-to-phoneme front end, embedded in the GGUF chat template)
+  Copyright 2026 Muhammed Nazeem
+  Source: https://github.com/n4ze3m/dizione
+  License: Apache-2.0
+  Dictionary data derived from CMUdict and the Wikipedia Homograph Data;
+  see phonemizer/LICENSE.cmudict and phonemizer/LICENSE.homograph-data in the
+  upstream tiny-voca repository.
 
-Emilia-YODAS, by the Amphion team (https://huggingface.co/datasets/amphion/Emilia-Dataset), licensed under CC-BY 4.0.
-Used as training data.
+llama.cpp / ggml (native inference runtime, vendored as a git submodule)
+  Copyright 2023-2026 ggml authors and contributors
+  Source: https://github.com/ggml-org/llama.cpp
+  License: MIT (see native/llama.cpp/LICENSE)
+
+The released tiny-voca weights were trained on synthetic speech generated with
+Qwen3-TTS (Apache-2.0). No recording of a real speaker is used.

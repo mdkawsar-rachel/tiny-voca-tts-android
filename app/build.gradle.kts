@@ -4,17 +4,35 @@ plugins {
 }
 
 android {
-    namespace = "woof.tts"
+    namespace = "tinyvoca.tts"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "woof.tts"
+        applicationId = "tinyvoca.tts"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 1
+        versionName = "1.0"
+
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
+        }
+        externalNativeBuild {
+            cmake {
+                // We only build the JNI target and its llama/llama-common/mtmd
+                // dependencies; llama.cpp's own tools/tests are configured but
+                // never compiled.
+                targets += "tinyvoca_jni"
+                cppFlags += "-std=c++17"
+                arguments += "-DANDROID_STL=c++_static"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
         }
     }
 
@@ -34,16 +52,17 @@ android {
         jvmTarget = "17"
     }
     androidResources {
-        noCompress += listOf("onnx", "tsv")
+        // GGUF must be stored uncompressed so ggml can mmap it directly from
+        // the copied file in filesDir without an extra decompress step.
+        noCompress += listOf("gguf")
+    }
+    packaging {
+        resources {
+            excludes += setOf("META-INF/LICENSE*", "META-INF/NOTICE*")
+        }
     }
 }
 
-tasks.withType<Test>().configureEach {
-    systemProperty("fixtures", rootProject.file("fixtures/all.tsv").absolutePath)
-    systemProperty("respell", rootProject.file("app/src/main/assets/respell.tsv").absolutePath)
-}
-
 dependencies {
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.24.3")
     testImplementation("junit:junit:4.13.2")
 }
