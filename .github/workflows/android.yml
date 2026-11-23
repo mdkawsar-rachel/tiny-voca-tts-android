@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -43,19 +43,18 @@ jobs:
       - name: Build native + Kotlin (Debug)
         run: ./gradlew assembleDebug --stacktrace
 
-      - name: Upload Debug APK
-        uses: actions/upload-artifact@v4
-        continue-on-error: true  # artifact storage quota can be exhausted on free accounts
-        with:
-          name: tiny-voca-tts-debug
-          path: app/build/outputs/apk/debug/*.apk
-
       - name: Build native + Kotlin (Release)
         run: ./gradlew assembleRelease --stacktrace
 
-      - name: Upload Release APK
-        uses: actions/upload-artifact@v4
-        continue-on-error: true
+      # GitHub Releases store assets outside the Actions artifact quota.
+      - name: Publish release APK
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
         with:
-          name: tiny-voca-tts-release
-          path: app/build/outputs/apk/release/*.apk
+          tag_name: v1.0
+          name: tiny-voca TTS v1.0
+          files: app/build/outputs/apk/release/*.apk
+          overwrite_files: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
